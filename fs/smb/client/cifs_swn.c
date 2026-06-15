@@ -25,6 +25,7 @@ struct cifs_swn_reg {
 
 	const char *net_name;
 	const char *share_name;
+	struct sockaddr_storage addr;
 	bool net_name_notify;
 	bool share_name_notify;
 	bool ip_notify;
@@ -34,6 +35,27 @@ struct cifs_swn_reg {
 	unsigned long check_interval;
 	struct delayed_work check;
 };
+
+static bool cifs_sockaddr_equal(const struct sockaddr_storage *addr1,
+				const struct sockaddr_storage *addr2)
+{
+	if (addr1->ss_family != addr2->ss_family)
+		return false;
+
+	if (addr1->ss_family == AF_INET) {
+		return (memcmp(&((const struct sockaddr_in *)addr1)->sin_addr,
+			       &((const struct sockaddr_in *)addr2)->sin_addr,
+			       sizeof(struct in_addr)) == 0);
+	}
+
+	if (addr1->ss_family == AF_INET6) {
+		return (memcmp(&((const struct sockaddr_in6 *)addr1)->sin6_addr,
+			       &((const struct sockaddr_in6 *)addr2)->sin6_addr,
+			       sizeof(struct in6_addr)) == 0);
+	}
+
+	return false;
+}
 
 static int cifs_swn_auth_info_krb(struct cifs_tcon *tcon, struct sk_buff *skb)
 {
@@ -81,7 +103,6 @@ static int cifs_swn_send_register_message(struct cifs_swn_reg *swnreg)
 	struct sk_buff *skb;
 	struct genlmsghdr *hdr;
 	enum securityEnum authtype;
-	struct sockaddr_storage *addr;
 	int ret;
 
 	skb = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
@@ -106,18 +127,8 @@ static int cifs_swn_send_register_message(struct cifs_swn_reg *swnreg)
 	if (ret < 0)
 		goto nlmsg_fail;
 
-	/*
-	 * If there is an address stored use it instead of the server address, because we are
-	 * in the process of reconnecting to it after a share has been moved or we have been
-	 * told to switch to it (client move message). In these cases we unregister from the
-	 * server address and register to the new address when we receive the notification.
-	 */
-	if (swnreg->tcon->ses->server->use_swn_dstaddr)
-		addr = &swnreg->tcon->ses->server->swn_dstaddr;
-	else
-		addr = &swnreg->tcon->ses->server->dstaddr;
-
-	ret = nla_put(skb, CIFS_GENL_ATTR_SWN_IP, sizeof(struct sockaddr_storage), addr);
+	ret = nla_put(skb, CIFS_GENL_ATTR_SWN_IP,
+		      sizeof(struct sockaddr_storage), &swnreg->addr);
 	if (ret < 0)
 		goto nlmsg_fail;
 
@@ -207,8 +218,8 @@ static int cifs_swn_send_unregister_message(struct cifs_swn_reg *swnreg)
 	if (ret < 0)
 		goto nlmsg_fail;
 
-	ret = nla_put(skb, CIFS_GENL_ATTR_SWN_IP, sizeof(struct sockaddr_storage),
-			&swnreg->tcon->ses->server->dstaddr);
+	ret = nla_put(skb, CIFS_GENL_ATTR_SWN_IP,
+		      sizeof(struct sockaddr_storage), &swnreg->addr);
 	if (ret < 0)
 		goto nlmsg_fail;
 
@@ -283,7 +294,6 @@ static void cifs_swn_reg_check(struct work_struct *work)
 	}
 	mutex_unlock(&cifs_swnreg_idr_mutex);
 
-
 	/*
 	 * It is safe to send the registration message multiple times.
 	 * The userspace client library tracks if registered or not
@@ -341,13 +351,35 @@ static struct cifs_swn_reg *cifs_find_swn_reg(struct cifs_tcon *tcon)
 	}
 
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
-		if (strcasecmp(swnreg->net_name, net_name) != 0
-		    || strcasecmp(swnreg->share_name, share_name) != 0) {
+		struct sockaddr_storage *tcon_dstaddr;
+
+		if (tcon->ses->server->use_swn_dstaddr) {
+			tcon_dstaddr = &tcon->ses->server->swn_dstaddr;
+		} else {
+			tcon_dstaddr = &tcon->ses->server->dstaddr;
+		}
+
+		if (strcasecmp(swnreg->net_name, net_name) != 0 ||
+		    strcasecmp(swnreg->share_name, share_name) != 0 ||
+		    !cifs_sockaddr_equal(&swnreg->addr, tcon_dstaddr)) {
 			continue;
 		}
 
-		cifs_dbg(FYI, "Existing swn registration for %s:%s found\n", swnreg->net_name,
+		if (swnreg->addr.ss_family == AF_INET) {
+			struct sockaddr_in *sin =
+				(struct sockaddr_in *)&swnreg->addr;
+			cifs_dbg(FYI,
+				"Existing swn registration for %pI4:%s:%s found\n",
+				&sin->sin_addr.s_addr, swnreg->net_name,
 				swnreg->share_name);
+		} else {
+			struct sockaddr_in6 *sin =
+				(struct sockaddr_in6 *)&swnreg->addr;
+			cifs_dbg(FYI,
+				 "Existing swn registration for %pI6:%s:%s found\n",
+				 &sin->sin6_addr.s6_addr, swnreg->net_name,
+				 swnreg->share_name);
+		}
 
 		kfree(net_name);
 		kfree(share_name);
@@ -410,6 +442,17 @@ static struct cifs_swn_reg *cifs_get_swn_reg(struct cifs_tcon *tcon)
 		goto fail_net_name;
 	}
 
+	/*
+	 * If there is an address stored use it instead of the server address, because we are
+	 * in the process of reconnecting to it after a share has been moved or we have been
+	 * told to switch to it (client move message). In these cases we unregister from the
+	 * server address and register to the new address when we receive the notification.
+	 */
+	if (tcon->ses->server->use_swn_dstaddr)
+		swnreg->addr = tcon->ses->server->swn_dstaddr;
+	else
+		swnreg->addr = tcon->ses->server->dstaddr;
+
 	swnreg->net_name_notify = true;
 	swnreg->share_name_notify =
 		(tcon->capabilities & SMB2_SHARE_CAP_ASYMMETRIC);
@@ -455,26 +498,6 @@ static int cifs_swn_resource_state_changed(struct cifs_swn_reg *swnreg, const ch
 	return 0;
 }
 
-static bool cifs_sockaddr_equal(struct sockaddr_storage *addr1, struct sockaddr_storage *addr2)
-{
-	if (addr1->ss_family != addr2->ss_family)
-		return false;
-
-	if (addr1->ss_family == AF_INET) {
-		return (memcmp(&((const struct sockaddr_in *)addr1)->sin_addr,
-				&((const struct sockaddr_in *)addr2)->sin_addr,
-				sizeof(struct in_addr)) == 0);
-	}
-
-	if (addr1->ss_family == AF_INET6) {
-		return (memcmp(&((const struct sockaddr_in6 *)addr1)->sin6_addr,
-				&((const struct sockaddr_in6 *)addr2)->sin6_addr,
-				sizeof(struct in6_addr)) == 0);
-	}
-
-	return false;
-}
-
 static int cifs_swn_store_swn_addr(const struct sockaddr_storage *new,
 				   const struct sockaddr_storage *old,
 				   struct sockaddr_storage *dst)
@@ -510,18 +533,12 @@ static int cifs_swn_reconnect(struct cifs_tcon *tcon, struct sockaddr_storage *a
 {
 	int ret = 0;
 
-	/* Store the reconnect address */
 	cifs_server_lock(tcon->ses->server);
-	if (cifs_sockaddr_equal(&tcon->ses->server->dstaddr, addr))
-		goto unlock;
 
-	ret = cifs_swn_store_swn_addr(addr, &tcon->ses->server->dstaddr,
-				      &tcon->ses->server->swn_dstaddr);
-	if (ret < 0) {
-		cifs_dbg(VFS, "%s: failed to store address: %d\n", __func__, ret);
+	if (cifs_sockaddr_equal(&tcon->ses->server->dstaddr, addr)) {
+		/* no-op */
 		goto unlock;
 	}
-	tcon->ses->server->use_swn_dstaddr = true;
 
 	/*
 	 * Unregister to stop receiving notifications for the old IP address.
@@ -530,8 +547,23 @@ static int cifs_swn_reconnect(struct cifs_tcon *tcon, struct sockaddr_storage *a
 	if (ret < 0) {
 		cifs_dbg(VFS, "%s: Failed to unregister for witness notifications: %d\n",
 			 __func__, ret);
+		/*
+		 * Do not jump return on error, continue storing and registering for
+		 * notifications for the new address. There will be a stale registration
+		 * around running its periodic check task, which should cancel itself
+		 * if no matching any tcon.
+		 */
+	}
+
+	/* Store the reconnect address */
+	ret = cifs_swn_store_swn_addr(addr, &tcon->ses->server->dstaddr,
+				      &tcon->ses->server->swn_dstaddr);
+	if (ret < 0) {
+		cifs_dbg(VFS, "%s: failed to store address: %d\n", __func__,
+			 ret);
 		goto unlock;
 	}
+	tcon->ses->server->use_swn_dstaddr = true;
 
 	/*
 	 * And register to receive notifications for the new IP address now that we have
@@ -684,16 +716,17 @@ void cifs_swn_dump(struct seq_file *m)
 	mutex_lock(&cifs_swnreg_idr_mutex);
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
 		seq_printf(m, "\nId: %u Refs: %u Network name: '%s'%s Share name: '%s'%s Ip address: ",
-				id, refcount_read(&swnreg->ref_count),
-				swnreg->net_name, swnreg->net_name_notify ? "(y)" : "(n)",
-				swnreg->share_name, swnreg->share_name_notify ? "(y)" : "(n)");
-		switch (swnreg->tcon->ses->server->dstaddr.ss_family) {
+				id, refcount_read(&swnreg->ref_count), swnreg->net_name,
+				swnreg->net_name_notify ? "(y)" : "(n)",
+				swnreg->share_name,
+				swnreg->share_name_notify ? "(y)" : "(n)");
+		switch (swnreg->addr.ss_family) {
 		case AF_INET:
-			sa = (struct sockaddr_in *) &swnreg->tcon->ses->server->dstaddr;
+			sa = (struct sockaddr_in *)&swnreg->addr;
 			seq_printf(m, "%pI4", &sa->sin_addr.s_addr);
 			break;
 		case AF_INET6:
-			sa6 = (struct sockaddr_in6 *) &swnreg->tcon->ses->server->dstaddr;
+			sa6 = (struct sockaddr_in6 *)&swnreg->addr;
 			seq_printf(m, "%pI6", &sa6->sin6_addr.s6_addr);
 			if (sa6->sin6_scope_id)
 				seq_printf(m, "%%%u", sa6->sin6_scope_id);
