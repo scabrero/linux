@@ -43,15 +43,25 @@ static bool cifs_sockaddr_equal(const struct sockaddr_storage *addr1,
 		return false;
 
 	if (addr1->ss_family == AF_INET) {
-		return (memcmp(&((const struct sockaddr_in *)addr1)->sin_addr,
-			       &((const struct sockaddr_in *)addr2)->sin_addr,
-			       sizeof(struct in_addr)) == 0);
+		const struct sockaddr_in *sin1 =
+			(const struct sockaddr_in *)addr1;
+		const struct sockaddr_in *sin2 =
+			(const struct sockaddr_in *)addr2;
+
+		return (memcmp(&sin1->sin_addr, &sin2->sin_addr,
+			       sizeof(struct in_addr)) == 0 &&
+			sin1->sin_port == sin2->sin_port);
 	}
 
 	if (addr1->ss_family == AF_INET6) {
-		return (memcmp(&((const struct sockaddr_in6 *)addr1)->sin6_addr,
-			       &((const struct sockaddr_in6 *)addr2)->sin6_addr,
-			       sizeof(struct in6_addr)) == 0);
+		const struct sockaddr_in6 *sin1 =
+			(const struct sockaddr_in6 *)addr1;
+		const struct sockaddr_in6 *sin2 =
+			(const struct sockaddr_in6 *)addr2;
+
+		return (memcmp(&sin1->sin6_addr, &sin2->sin6_addr,
+			       sizeof(struct in6_addr)) == 0 &&
+			sin1->sin6_port == sin2->sin6_port);
 	}
 
 	return false;
