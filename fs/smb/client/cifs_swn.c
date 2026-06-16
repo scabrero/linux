@@ -5,7 +5,7 @@
  * Copyright (c) 2020 Samuel Cabrero <scabrero@suse.de>
  */
 
-#include <linux/kref.h>
+#include <linux/refcount.h>
 #include <net/genetlink.h>
 #include <uapi/linux/cifs/cifs_netlink.h>
 
@@ -21,7 +21,7 @@ static DEFINE_MUTEX(cifs_swnreg_idr_mutex);
 
 struct cifs_swn_reg {
 	int id;
-	struct kref ref_count;
+	refcount_t ref_count;
 
 	const char *net_name;
 	const char *share_name;
@@ -309,7 +309,7 @@ static struct cifs_swn_reg *cifs_get_swn_reg(struct cifs_tcon *tcon)
 	/* Check if we are already registered for this network and share names */
 	swnreg = cifs_find_swn_reg(tcon);
 	if (!IS_ERR(swnreg)) {
-		kref_get(&swnreg->ref_count);
+		refcount_inc(&swnreg->ref_count);
 		goto unlock;
 	} else if (PTR_ERR(swnreg) != -EEXIST) {
 		goto unlock;
@@ -321,7 +321,7 @@ static struct cifs_swn_reg *cifs_get_swn_reg(struct cifs_tcon *tcon)
 		goto fail_unlock;
 	}
 
-	kref_init(&swnreg->ref_count);
+	refcount_set(&swnreg->ref_count, 1);
 
 	swnreg->id = idr_alloc(&cifs_swnreg_idr, swnreg, 1, 0, GFP_ATOMIC);
 	if (swnreg->id < 0) {
@@ -366,16 +366,14 @@ fail_unlock:
 	return ERR_PTR(ret);
 }
 
-static void cifs_swn_reg_release(struct kref *ref)
+static void cifs_swn_reg_release(struct cifs_swn_reg *swnreg)
 {
-	struct cifs_swn_reg *swnreg = container_of(ref, struct cifs_swn_reg, ref_count);
 	int ret;
 
 	ret = cifs_swn_send_unregister_message(swnreg);
 	if (ret < 0)
 		cifs_dbg(VFS, "%s: Failed to send unregister message: %d\n", __func__, ret);
 
-	idr_remove(&cifs_swnreg_idr, swnreg->id);
 	kfree(swnreg->net_name);
 	kfree(swnreg->share_name);
 	kfree(swnreg);
@@ -383,9 +381,14 @@ static void cifs_swn_reg_release(struct kref *ref)
 
 static void cifs_put_swn_reg(struct cifs_swn_reg *swnreg)
 {
-	mutex_lock(&cifs_swnreg_idr_mutex);
-	kref_put(&swnreg->ref_count, cifs_swn_reg_release);
+	if (!refcount_dec_and_mutex_lock(&swnreg->ref_count,
+					 &cifs_swnreg_idr_mutex))
+		return;
+
+	idr_remove(&cifs_swnreg_idr, swnreg->id);
 	mutex_unlock(&cifs_swnreg_idr_mutex);
+
+	cifs_swn_reg_release(swnreg);
 }
 
 static int cifs_swn_resource_state_changed(struct cifs_swn_reg *swnreg, const char *name, int state)
@@ -632,7 +635,7 @@ void cifs_swn_dump(struct seq_file *m)
 	mutex_lock(&cifs_swnreg_idr_mutex);
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
 		seq_printf(m, "\nId: %u Refs: %u Network name: '%s'%s Share name: '%s'%s Ip address: ",
-				id, kref_read(&swnreg->ref_count),
+				id, refcount_read(&swnreg->ref_count),
 				swnreg->net_name, swnreg->net_name_notify ? "(y)" : "(n)",
 				swnreg->share_name, swnreg->share_name_notify ? "(y)" : "(n)");
 		switch (swnreg->tcon->ses->server->dstaddr.ss_family) {
