@@ -415,7 +415,7 @@ static struct cifs_swn_reg *cifs_find_swn_reg(struct cifs_tcon *tcon)
 		}
 	}
 
-	return ERR_PTR(-EEXIST);
+	return ERR_PTR(-ENOENT);
 }
 
 /*
@@ -434,7 +434,7 @@ static struct cifs_swn_reg *cifs_get_swn_reg(struct cifs_tcon *tcon)
 	if (!IS_ERR(swnreg)) {
 		refcount_inc(&swnreg->ref_count);
 		goto unlock;
-	} else if (PTR_ERR(swnreg) != -EEXIST) {
+	} else if (PTR_ERR(swnreg) != -ENOENT) {
 		goto unlock;
 	}
 
