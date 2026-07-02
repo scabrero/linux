@@ -233,7 +233,7 @@ static bool cifs_swn_reg_net_name_matches(const struct cifs_swn_reg *swnreg,
 		return false;
 
 	host_len = delim - host;
-	if (strlen(swnreg->net_name) == host_len &&
+	if (swnreg->net_name != NULL && strlen(swnreg->net_name) == host_len &&
 	    !strncasecmp(swnreg->net_name, host, host_len)) {
 		return true;
 	}
@@ -289,7 +289,7 @@ static bool cifs_swn_reg_tcon_matches(const struct cifs_swn_reg *swnreg,
 		return false;
 
 	// The network name notification is always enabled
-	if (!cifs_swn_reg_net_name_matches(swnreg, tcon))
+	if (swnreg->net_name_notify && !cifs_swn_reg_net_name_matches(swnreg, tcon))
 		return false;
 
 	// Share name notifications is enabled only if asymmetric
@@ -364,26 +364,28 @@ static int cifs_swn_send_register_message(struct cifs_swn_reg *swnreg)
 	if (ret < 0)
 		goto nlmsg_fail;
 
-	ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_NET_NAME, swnreg->net_name);
-	if (ret < 0)
-		goto nlmsg_fail;
-
-	ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_SHARE_NAME, swnreg->share_name);
-	if (ret < 0)
-		goto nlmsg_fail;
-
 	ret = nla_put(skb, CIFS_GENL_ATTR_SWN_IP,
 		      sizeof(struct sockaddr_storage), &swnreg->addr);
 	if (ret < 0)
 		goto nlmsg_fail;
 
 	if (swnreg->net_name_notify) {
+		ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_NET_NAME,
+				     swnreg->net_name);
+		if (ret < 0)
+			goto nlmsg_fail;
+
 		ret = nla_put_flag(skb, CIFS_GENL_ATTR_SWN_NET_NAME_NOTIFY);
 		if (ret < 0)
 			goto nlmsg_fail;
 	}
 
 	if (swnreg->share_name_notify) {
+		ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_SHARE_NAME,
+				     swnreg->share_name);
+		if (ret < 0)
+			goto nlmsg_fail;
+
 		ret = nla_put_flag(skb, CIFS_GENL_ATTR_SWN_SHARE_NAME_NOTIFY);
 		if (ret < 0)
 			goto nlmsg_fail;
@@ -421,8 +423,8 @@ static int cifs_swn_send_register_message(struct cifs_swn_reg *swnreg)
 	genlmsg_end(skb, hdr);
 	genlmsg_multicast(&cifs_genl_family, skb, 0, CIFS_GENL_MCGRP_SWN, GFP_ATOMIC);
 
-	cifs_dbg(FYI, "%s: Message to register for network name %s with id %d sent\n", __func__,
-			swnreg->net_name, swnreg->id);
+	cifs_dbg(FYI, "%s: Message to register for network name '%s' with id %d sent\n", __func__,
+			swnreg->net_name ? swnreg->net_name : "", swnreg->id);
 
 	return 0;
 
@@ -457,26 +459,28 @@ static int cifs_swn_send_unregister_message(struct cifs_swn_reg *swnreg)
 	if (ret < 0)
 		goto nlmsg_fail;
 
-	ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_NET_NAME, swnreg->net_name);
-	if (ret < 0)
-		goto nlmsg_fail;
-
-	ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_SHARE_NAME, swnreg->share_name);
-	if (ret < 0)
-		goto nlmsg_fail;
-
 	ret = nla_put(skb, CIFS_GENL_ATTR_SWN_IP,
 		      sizeof(struct sockaddr_storage), &swnreg->addr);
 	if (ret < 0)
 		goto nlmsg_fail;
 
 	if (swnreg->net_name_notify) {
+		ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_NET_NAME,
+				     swnreg->net_name);
+		if (ret < 0)
+			goto nlmsg_fail;
+
 		ret = nla_put_flag(skb, CIFS_GENL_ATTR_SWN_NET_NAME_NOTIFY);
 		if (ret < 0)
 			goto nlmsg_fail;
 	}
 
 	if (swnreg->share_name_notify) {
+		ret = nla_put_string(skb, CIFS_GENL_ATTR_SWN_SHARE_NAME,
+				     swnreg->share_name);
+		if (ret < 0)
+			goto nlmsg_fail;
+
 		ret = nla_put_flag(skb, CIFS_GENL_ATTR_SWN_SHARE_NAME_NOTIFY);
 		if (ret < 0)
 			goto nlmsg_fail;
@@ -491,8 +495,8 @@ static int cifs_swn_send_unregister_message(struct cifs_swn_reg *swnreg)
 	genlmsg_end(skb, hdr);
 	genlmsg_multicast(&cifs_genl_family, skb, 0, CIFS_GENL_MCGRP_SWN, GFP_ATOMIC);
 
-	cifs_dbg(FYI, "%s: Message to unregister for network name %s with id %d sent\n", __func__,
-			swnreg->net_name, swnreg->id);
+	cifs_dbg(FYI, "%s: Message to unregister for network name '%s' with id %d sent\n", __func__,
+			swnreg->net_name ? swnreg->net_name : "", swnreg->id);
 
 	return 0;
 
@@ -954,29 +958,40 @@ int cifs_swn_register(struct cifs_tcon *tcon)
 		return ret;
 	}
 
-	swnreg->net_name = extract_hostname(tcon->tree_name);
-	if (IS_ERR(swnreg->net_name)) {
-		ret = PTR_ERR(swnreg->net_name);
-		cifs_dbg(VFS,
-			 "%s: failed to extract host name from target: %d\n",
-			 __func__, ret);
-		idr_remove(&cifs_swnreg_idr, swnreg->id);
-		kfree(swnreg);
-		mutex_unlock(&cifs_swnreg_idr_mutex);
-		return ret;
+	swnreg->net_name_notify = true;
+	swnreg->share_name_notify =
+		(tcon->capabilities & SMB2_SHARE_CAP_ASYMMETRIC);
+	swnreg->ip_notify = false;
+
+	if (swnreg->net_name_notify) {
+		swnreg->net_name = extract_hostname(tcon->tree_name);
+		if (IS_ERR(swnreg->net_name)) {
+			ret = PTR_ERR(swnreg->net_name);
+			cifs_dbg(
+				VFS,
+				"%s: failed to extract host name from target: %d\n",
+				__func__, ret);
+			idr_remove(&cifs_swnreg_idr, swnreg->id);
+			kfree(swnreg);
+			mutex_unlock(&cifs_swnreg_idr_mutex);
+			return ret;
+		}
 	}
 
-	swnreg->share_name = extract_sharename(tcon->tree_name);
-	if (IS_ERR(swnreg->share_name)) {
-		ret = PTR_ERR(swnreg->share_name);
-		cifs_dbg(VFS,
-			 "%s: failed to extract share name from target: %d\n",
-			 __func__, ret);
-		kfree(swnreg->net_name);
-		idr_remove(&cifs_swnreg_idr, swnreg->id);
-		kfree(swnreg);
-		mutex_unlock(&cifs_swnreg_idr_mutex);
-		return ret;
+	if (swnreg->share_name_notify) {
+		swnreg->share_name = extract_sharename(tcon->tree_name);
+		if (IS_ERR(swnreg->share_name)) {
+			ret = PTR_ERR(swnreg->share_name);
+			cifs_dbg(
+				VFS,
+				"%s: failed to extract share name from target: %d\n",
+				__func__, ret);
+			kfree(swnreg->net_name);
+			idr_remove(&cifs_swnreg_idr, swnreg->id);
+			kfree(swnreg);
+			mutex_unlock(&cifs_swnreg_idr_mutex);
+			return ret;
+		}
 	}
 
 	ret = cifs_swn_reg_set_auth(swnreg, tcon);
@@ -1001,11 +1016,6 @@ int cifs_swn_register(struct cifs_tcon *tcon)
 		swnreg->addr = tcon->ses->server->swn_dstaddr;
 	else
 		swnreg->addr = tcon->ses->server->dstaddr;
-
-	swnreg->net_name_notify = true;
-	swnreg->share_name_notify =
-		(tcon->capabilities & SMB2_SHARE_CAP_ASYMMETRIC);
-	swnreg->ip_notify = false;
 
 	swnreg->check_interval = tcon->ses->server->echo_interval;
 	INIT_DELAYED_WORK(&swnreg->check, cifs_swn_reg_check);
@@ -1052,9 +1062,10 @@ void cifs_swn_dump(struct seq_file *m)
 	mutex_lock(&cifs_swnreg_idr_mutex);
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
 		seq_printf(m, "\nId: %d Refs: %u Network name: '%s'%s Share name: '%s'%s Ip address: ",
-				id, refcount_read(&swnreg->ref_count), swnreg->net_name,
+				id, refcount_read(&swnreg->ref_count),
+				swnreg->net_name ? swnreg->net_name : "",
 				swnreg->net_name_notify ? "(y)" : "(n)",
-				swnreg->share_name,
+				swnreg->share_name ? swnreg->share_name : "",
 				swnreg->share_name_notify ? "(y)" : "(n)");
 		switch (swnreg->addr.ss_family) {
 		case AF_INET:
