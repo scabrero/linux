@@ -5,7 +5,7 @@
  * Copyright (c) 2020 Samuel Cabrero <scabrero@suse.de>
  */
 
-#include <linux/refcount.h>
+#include <linux/kref.h>
 #include <net/genetlink.h>
 #include <uapi/linux/cifs/cifs_netlink.h>
 
@@ -21,7 +21,7 @@ static DEFINE_MUTEX(cifs_swnreg_idr_mutex);
 
 struct cifs_swn_reg {
 	int id;
-	refcount_t ref_count;
+	struct kref ref_count;
 
 	const char *net_name;
 	const char *share_name;
@@ -535,6 +535,12 @@ static void cifs_swn_reg_release(struct cifs_swn_reg *swnreg)
 	kfree(swnreg);
 }
 
+static void cifs_swn_reg_idr_remove(struct kref *ref)
+{
+	struct cifs_swn_reg *swnreg = container_of(ref, struct cifs_swn_reg, ref_count);
+	idr_remove(&cifs_swnreg_idr, swnreg->id);
+}
+
 /*
  * Periodic task to enforce registration even when the userspace daemon is
  * started after mounting the share.
@@ -556,7 +562,7 @@ static void cifs_swn_reg_check(struct work_struct *work)
 	 * before releasing the swnreg.
 	 */
 	mutex_lock(&cifs_swnreg_idr_mutex);
-	if (!refcount_inc_not_zero(&swnreg->ref_count)) {
+	if (!kref_get_unless_zero(&swnreg->ref_count)) {
 		mutex_unlock(&cifs_swnreg_idr_mutex);
 		return;
 	}
@@ -573,8 +579,7 @@ static void cifs_swn_reg_check(struct work_struct *work)
 		 * are no matching tcons. Release, dropping our reference first.
 		 */
 		mutex_lock(&cifs_swnreg_idr_mutex);
-		if (refcount_dec_and_test(&swnreg->ref_count)) {
-			idr_remove(&cifs_swnreg_idr, swnreg->id);
+		if (kref_put(&swnreg->ref_count, cifs_swn_reg_idr_remove)) {
 			mutex_unlock(&cifs_swnreg_idr_mutex);
 			cifs_swn_reg_release(swnreg);
 			return;
@@ -584,8 +589,7 @@ static void cifs_swn_reg_check(struct work_struct *work)
 		 * Again, to maybe release the swnreg. If there are other
 		 * live references, next check run might release it.
 		 */
-		if (refcount_dec_and_test(&swnreg->ref_count)) {
-			idr_remove(&cifs_swnreg_idr, swnreg->id);
+		if (kref_put(&swnreg->ref_count, cifs_swn_reg_idr_remove)) {
 			mutex_unlock(&cifs_swnreg_idr_mutex);
 			cifs_swn_reg_release(swnreg);
 			return;
@@ -611,8 +615,7 @@ static void cifs_swn_reg_check(struct work_struct *work)
 
 	/* Release our reference */
 	mutex_lock(&cifs_swnreg_idr_mutex);
-	if (refcount_dec_and_test(&swnreg->ref_count)) {
-		idr_remove(&cifs_swnreg_idr, swnreg->id);
+	if (kref_put(&swnreg->ref_count, cifs_swn_reg_idr_remove)) {
 		mutex_unlock(&cifs_swnreg_idr_mutex);
 		cifs_swn_reg_release(swnreg);
 		return;
@@ -632,7 +635,7 @@ static struct cifs_swn_reg *cifs_find_swn_reg(struct cifs_tcon *tcon)
 	int id;
 
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
-		if (refcount_read(&swnreg->ref_count) == 0)
+		if (kref_read(&swnreg->ref_count) == 0)
 			continue;
 
 		if (cifs_swn_reg_tcon_matches(swnreg, tcon))
@@ -893,7 +896,7 @@ int cifs_swn_notify(struct sk_buff *skb, struct genl_info *info)
 	 * and release the swnreg_idr_mutex because processing will take
 	 * cifs_tcp_ses_lock.
 	 */
-	if (!refcount_inc_not_zero(&not.swnreg->ref_count)) {
+	if (!kref_get_unless_zero(&not.swnreg->ref_count)) {
 		/* The registration is being released, ignore the notificaiton */
 		mutex_unlock(&cifs_swnreg_idr_mutex);
 		return 0;
@@ -908,8 +911,7 @@ int cifs_swn_notify(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	mutex_lock(&cifs_swnreg_idr_mutex);
-	if (refcount_dec_and_test(&not.swnreg->ref_count)) {
-		idr_remove(&cifs_swnreg_idr, not.swnreg->id);
+	if (kref_put(&not.swnreg->ref_count, cifs_swn_reg_idr_remove)) {
 		mutex_unlock(&cifs_swnreg_idr_mutex);
 		cancel_delayed_work_sync(&not.swnreg->check);
 		cifs_swn_reg_release(not.swnreg);
@@ -933,7 +935,7 @@ int cifs_swn_register(struct cifs_tcon *tcon)
 		 * There is a registration matching this tcon, could be a second mount of
 		 * the same share, increment the refcount.
 		 */
-		if (refcount_inc_not_zero(&swnreg->ref_count)) {
+		if (kref_get_unless_zero(&swnreg->ref_count)) {
 			mutex_unlock(&cifs_swnreg_idr_mutex);
 			return 0;
 		}
@@ -950,7 +952,7 @@ int cifs_swn_register(struct cifs_tcon *tcon)
 		return -ENOMEM;
 	}
 
-	refcount_set(&swnreg->ref_count, 1);
+	kref_init(&swnreg->ref_count);
 
 	swnreg->id = idr_alloc(&cifs_swnreg_idr, swnreg, 1, 0, GFP_KERNEL);
 	if (swnreg->id < 0) {
@@ -1042,8 +1044,7 @@ int cifs_swn_unregister(struct cifs_tcon *tcon)
 		mutex_unlock(&cifs_swnreg_idr_mutex);
 		return 0;
 	}
-	if (refcount_dec_and_test(&swnreg->ref_count)) {
-		idr_remove(&cifs_swnreg_idr, swnreg->id);
+	if (kref_put(&swnreg->ref_count, cifs_swn_reg_idr_remove)) {
 		mutex_unlock(&cifs_swnreg_idr_mutex);
 		cancel_delayed_work_sync(&swnreg->check);
 		cifs_swn_reg_release(swnreg);
@@ -1066,7 +1067,7 @@ void cifs_swn_dump(struct seq_file *m)
 	mutex_lock(&cifs_swnreg_idr_mutex);
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
 		seq_printf(m, "\nId: %d Refs: %u Network name: '%s'%s Share name: '%s'%s Ip address: ",
-				id, refcount_read(&swnreg->ref_count),
+				id, kref_read(&swnreg->ref_count),
 				swnreg->net_name ? swnreg->net_name : "",
 				swnreg->net_name_notify ? "(y)" : "(n)",
 				swnreg->share_name ? swnreg->share_name : "",
