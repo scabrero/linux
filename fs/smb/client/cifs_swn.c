@@ -106,27 +106,6 @@ static int cifs_swn_reg_set_auth(struct cifs_swn_reg *swnreg,
 	return 0;
 }
 
-static bool cifs_sockaddr_equal(const struct sockaddr_storage *addr1,
-				const struct sockaddr_storage *addr2)
-{
-	if (addr1->ss_family != addr2->ss_family)
-		return false;
-
-	if (addr1->ss_family == AF_INET) {
-		return (memcmp(&((const struct sockaddr_in *)addr1)->sin_addr,
-			       &((const struct sockaddr_in *)addr2)->sin_addr,
-			       sizeof(struct in_addr)) == 0);
-	}
-
-	if (addr1->ss_family == AF_INET6) {
-		return (memcmp(&((const struct sockaddr_in6 *)addr1)->sin6_addr,
-			       &((const struct sockaddr_in6 *)addr2)->sin6_addr,
-			       sizeof(struct in6_addr)) == 0);
-	}
-
-	return false;
-}
-
 static bool cifs_swn_str_equal(const char *a, const char *b)
 {
 	if (a == b)
@@ -285,7 +264,8 @@ static bool cifs_swn_reg_tcon_matches(const struct cifs_swn_reg *swnreg,
 		return false;
 
 	// Address must always match
-	if (!cifs_sockaddr_equal(&swnreg->addr, tcon_dstaddr))
+	if (!cifs_match_ipaddr((struct sockaddr *)&swnreg->addr,
+			       (struct sockaddr *)tcon_dstaddr))
 		return false;
 
 	// The network name notification is always enabled
@@ -701,7 +681,8 @@ static bool cifs_swn_client_move(struct cifs_tcon *tcon,
 	struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)addr;
 	int ret;
 
-	if (cifs_sockaddr_equal(&tcon->ses->server->dstaddr, addr)) {
+	if (cifs_match_ipaddr((struct sockaddr *)&tcon->ses->server->dstaddr,
+			       (struct sockaddr *)addr)) {
 		/* no-op */
 		return false;
 	}
