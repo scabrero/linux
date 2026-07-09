@@ -635,9 +635,6 @@ static struct cifs_swn_reg *cifs_find_swn_reg(struct cifs_tcon *tcon)
 	int id;
 
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
-		if (kref_read(&swnreg->ref_count) == 0)
-			continue;
-
 		if (cifs_swn_reg_tcon_matches(swnreg, tcon))
 			return swnreg;
 	}
