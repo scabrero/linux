@@ -259,21 +259,23 @@ static bool cifs_swn_reg_tcon_matches(const struct cifs_swn_reg *swnreg,
 	else
 		tcon_dstaddr = &tcon->ses->server->dstaddr;
 
-	// Auth info must match
+	/* Auth info must match */
 	if (!cifs_swn_auth_info_equal(swnreg, tcon))
 		return false;
 
-	// Address must always match
+	/* Address must always match */
 	if (!cifs_match_ipaddr((struct sockaddr *)&swnreg->addr,
 			       (struct sockaddr *)tcon_dstaddr))
 		return false;
 
-	// The network name notification is always enabled
+	/* The network name notification is always enabled */
 	if (swnreg->net_name_notify && !cifs_swn_reg_net_name_matches(swnreg, tcon))
 		return false;
 
-	// Share name notifications is enabled only if asymmetric
-	// capability enabled otherwise ignored
+	/*
+	 * Share name notifications is enabled only if asymmetric
+	 * capability enabled otherwise ignored
+	 */
 	if (swnreg->share_name_notify !=
 	    (tcon->capabilities & SMB2_SHARE_CAP_ASYMMETRIC))
 		return false;
