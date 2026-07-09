@@ -677,8 +677,6 @@ static int cifs_swn_store_swn_addr(const struct sockaddr_storage *new,
 static bool cifs_swn_client_move(struct cifs_tcon *tcon,
 				 struct sockaddr_storage *addr)
 {
-	struct sockaddr_in *ipv4 = (struct sockaddr_in *)addr;
-	struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)addr;
 	int ret;
 
 	if (cifs_match_ipaddr((struct sockaddr *)&tcon->ses->server->dstaddr,
@@ -687,10 +685,7 @@ static bool cifs_swn_client_move(struct cifs_tcon *tcon,
 		return false;
 	}
 
-	if (addr->ss_family == AF_INET)
-		cifs_dbg(FYI, "%s: move to %pI4\n", __func__, &ipv4->sin_addr);
-	else if (addr->ss_family == AF_INET6)
-		cifs_dbg(FYI, "%s: move to %pI6\n", __func__, &ipv6->sin6_addr);
+	cifs_dbg(FYI, "%s: move to %pISc\n", __func__, addr);
 
 	/* Store the reconnect address */
 	ret = cifs_swn_store_swn_addr(addr, &tcon->ses->server->dstaddr,
@@ -1036,35 +1031,19 @@ int cifs_swn_unregister(struct cifs_tcon *tcon)
 void cifs_swn_dump(struct seq_file *m)
 {
 	struct cifs_swn_reg *swnreg;
-	struct sockaddr_in *sa;
-	struct sockaddr_in6 *sa6;
 	int id;
 
 	seq_puts(m, "Witness registrations:");
 
 	mutex_lock(&cifs_swnreg_idr_mutex);
 	idr_for_each_entry(&cifs_swnreg_idr, swnreg, id) {
-		seq_printf(m, "\nId: %d Refs: %u Network name: '%s'%s Share name: '%s'%s Ip address: ",
+		seq_printf(m, "\nId: %d Refs: %u Network name: '%s'%s Share name: '%s'%s Ip address: '%pISc'%s",
 				id, kref_read(&swnreg->ref_count),
 				swnreg->net_name ? swnreg->net_name : "",
 				swnreg->net_name_notify ? "(y)" : "(n)",
 				swnreg->share_name ? swnreg->share_name : "",
-				swnreg->share_name_notify ? "(y)" : "(n)");
-		switch (swnreg->addr.ss_family) {
-		case AF_INET:
-			sa = (struct sockaddr_in *)&swnreg->addr;
-			seq_printf(m, "%pI4", &sa->sin_addr.s_addr);
-			break;
-		case AF_INET6:
-			sa6 = (struct sockaddr_in6 *)&swnreg->addr;
-			seq_printf(m, "%pI6", &sa6->sin6_addr.s6_addr);
-			if (sa6->sin6_scope_id)
-				seq_printf(m, "%%%u", sa6->sin6_scope_id);
-			break;
-		default:
-			seq_puts(m, "(unknown)");
-		}
-		seq_printf(m, "%s", swnreg->ip_notify ? "(y)" : "(n)");
+				swnreg->share_name_notify ? "(y)" : "(n)",
+				&swnreg->addr, swnreg->ip_notify ? "(y)" : "(n)");
 	}
 	mutex_unlock(&cifs_swnreg_idr_mutex);
 	seq_puts(m, "\n");
